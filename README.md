@@ -1,4 +1,4 @@
-# oha (おはよう)
+# oha
 
 [![GitHub Actions](https://github.com/hatoo/oha/workflows/CI/badge.svg)](https://github.com/hatoo/oha/actions?query=workflow%3ACI)
 [![Crates.io](https://img.shields.io/crates/v/oha.svg)](https://crates.io/crates/oha)
