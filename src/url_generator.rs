@@ -8,15 +8,20 @@ use url::{ParseError, Url};
 #[derive(Clone, Debug)]
 pub enum UrlGenerator {
     Static(Url),
+    MultiStatic(Vec<Url>),
     Dynamic(Regex),
 }
 
 #[derive(Error, Debug)]
 pub enum UrlGeneratorError {
     #[error("{0}, generated url: {1}")]
-    ParseError(ParseError, String),
+    Parse(ParseError, String),
     #[error(transparent)]
-    FromUtf8Error(#[from] FromUtf8Error),
+    FromUtf8(#[from] FromUtf8Error),
+    #[error("No valid URLs found")]
+    NoURLs(),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 impl UrlGenerator {
@@ -24,18 +29,31 @@ impl UrlGenerator {
         Self::Static(url)
     }
 
+    pub fn new_multi_static(urls: Vec<Url>) -> Self {
+        assert!(!urls.is_empty());
+        Self::MultiStatic(urls)
+    }
+
     pub fn new_dynamic(regex: Regex) -> Self {
         Self::Dynamic(regex)
     }
 
-    pub fn generate<R: Rng>(&self, rng: &mut R) -> Result<Cow<Url>, UrlGeneratorError> {
+    pub fn generate<R: Rng>(&self, rng: &mut R) -> Result<Cow<'_, Url>, UrlGeneratorError> {
         match self {
             Self::Static(url) => Ok(Cow::Borrowed(url)),
+            Self::MultiStatic(urls) => {
+                if let Some(random_url) = urls.choose(rng) {
+                    Ok(Cow::Borrowed(random_url))
+                } else {
+                    Err(UrlGeneratorError::NoURLs())
+                }
+            }
             Self::Dynamic(regex) => {
                 let generated = Distribution::<Result<String, FromUtf8Error>>::sample(regex, rng)?;
-                Ok(Cow::Owned(Url::parse(generated.as_str()).map_err(|e| {
-                    UrlGeneratorError::ParseError(e, generated)
-                })?))
+                Ok(Cow::Owned(
+                    Url::parse(generated.as_str())
+                        .map_err(|e| UrlGeneratorError::Parse(e, generated))?,
+                ))
             }
         }
     }
@@ -54,9 +72,27 @@ mod tests {
     #[test]
     fn test_url_generator_static() {
         let url_generator = UrlGenerator::new_static(Url::parse("http://127.0.0.1/test").unwrap());
-        let url = url_generator.generate(&mut thread_rng()).unwrap();
+        let url = url_generator.generate(&mut rand::rng()).unwrap();
         assert_eq!(url.host(), Some(Host::Ipv4(Ipv4Addr::new(127, 0, 0, 1))));
         assert_eq!(url.path(), "/test");
+    }
+
+    #[test]
+    fn test_url_generator_multistatic() {
+        let urls = [
+            "http://127.0.0.1/a1",
+            "http://127.0.0.1/b2",
+            "http://127.0.0.1/c3",
+        ];
+
+        let url_generator =
+            UrlGenerator::new_multi_static(urls.iter().map(|u| Url::parse(u).unwrap()).collect());
+
+        for _ in 0..10 {
+            let url = url_generator.generate(&mut rand::rng()).unwrap();
+            assert_eq!(url.host(), Some(Host::Ipv4(Ipv4Addr::new(127, 0, 0, 1))));
+            assert!(urls.contains(&url.as_str()));
+        }
     }
 
     #[test]
@@ -65,12 +101,14 @@ mod tests {
         let url_generator = UrlGenerator::new_dynamic(
             RandRegex::compile(&format!(r"http://127\.0\.0\.1{path_regex}"), 4).unwrap(),
         );
-        let url = url_generator.generate(&mut thread_rng()).unwrap();
+        let url = url_generator.generate(&mut rand::rng()).unwrap();
         assert_eq!(url.host(), Some(Host::Ipv4(Ipv4Addr::new(127, 0, 0, 1))));
-        assert!(Regex::new(path_regex)
-            .unwrap()
-            .captures(url.path())
-            .is_some());
+        assert!(
+            Regex::new(path_regex)
+                .unwrap()
+                .captures(url.path())
+                .is_some()
+        );
     }
 
     #[test]
@@ -80,7 +118,29 @@ mod tests {
         );
 
         for _ in 0..100 {
-            let rng: Pcg64Si = SeedableRng::from_entropy();
+            let rng: Pcg64Si = SeedableRng::from_os_rng();
+
+            assert_eq!(
+                url_generator.generate(&mut rng.clone()).unwrap(),
+                url_generator.generate(&mut rng.clone()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_url_generator_multi_consistency() {
+        let urls = [
+            "http://example.com/a1",
+            "http://example.com/a2",
+            "http://example.com/a3",
+            "http://example.com/a4",
+            "http://example.com/a5",
+        ];
+        let url_generator =
+            UrlGenerator::new_multi_static(urls.iter().map(|u| Url::parse(u).unwrap()).collect());
+
+        for _ in 0..100 {
+            let rng: Pcg64Si = SeedableRng::from_os_rng();
 
             assert_eq!(
                 url_generator.generate(&mut rng.clone()).unwrap(),

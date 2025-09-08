@@ -1,23 +1,18 @@
 use byte_unit::Byte;
-use crossterm::{
-    event::{Event, KeyCode, KeyEvent, KeyModifiers},
-    ExecutableCommand,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use hyper::http;
-use ratatui::crossterm;
+use ratatui::{DefaultTerminal, crossterm};
 use ratatui::{
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{BarChart, Block, Borders, Gauge, Paragraph},
-    Terminal,
 };
-use std::{collections::BTreeMap, io};
+use std::collections::BTreeMap;
 
 use crate::{
     client::{ClientError, RequestResult},
-    printer::PrintMode,
+    printer::PrintConfig,
     result_data::{MinMaxMean, ResultData},
     timescale::{TimeLabel, TimeScale},
 };
@@ -53,45 +48,36 @@ impl ColorScheme {
 }
 
 pub struct Monitor {
-    pub print_mode: PrintMode,
+    pub print_config: PrintConfig,
     pub end_line: EndLine,
     /// All workers sends each result to this channel
-    pub report_receiver: flume::Receiver<Result<RequestResult, ClientError>>,
+    pub report_receiver: kanal::Receiver<Result<RequestResult, ClientError>>,
     // When started
     pub start: std::time::Instant,
     // Frame per second of TUI
     pub fps: usize,
     pub disable_color: bool,
-    pub stats_success_breakdown: bool,
+    pub time_unit: Option<TimeScale>,
 }
 
 struct IntoRawMode;
 
 impl IntoRawMode {
-    pub fn new() -> Result<Self, std::io::Error> {
-        crossterm::terminal::enable_raw_mode()?;
-        io::stdout().execute(crossterm::terminal::EnterAlternateScreen)?;
-        io::stdout().execute(crossterm::cursor::Hide)?;
-        Ok(IntoRawMode)
+    pub fn new() -> Result<(Self, DefaultTerminal), std::io::Error> {
+        let terminal = ratatui::try_init()?;
+        Ok((Self, terminal))
     }
 }
 
 impl Drop for IntoRawMode {
     fn drop(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = io::stdout().execute(crossterm::terminal::LeaveAlternateScreen);
-        let _ = io::stdout().execute(crossterm::cursor::Show);
+        ratatui::restore();
     }
 }
 
 impl Monitor {
-    pub async fn monitor(self) -> Result<ResultData, std::io::Error> {
-        let raw_mode = IntoRawMode::new()?;
-
-        let mut terminal = {
-            let backend = CrosstermBackend::new(io::stdout());
-            Terminal::new(backend)?
-        };
+    pub async fn monitor(self) -> Result<(ResultData, PrintConfig), std::io::Error> {
+        let (raw_mode, mut terminal) = IntoRawMode::new()?;
 
         // Return this when ends to application print summary
         // We must not read all data from this due to computational cost.
@@ -104,18 +90,20 @@ impl Monitor {
         let nofile_limit = rlimit::getrlimit(rlimit::Resource::NOFILE);
 
         // None means auto timescale which depends on how long it takes
-        let mut timescale_auto = None;
+        let mut timescale_auto = self.time_unit;
 
         let mut colors = ColorScheme::new();
         if !self.disable_color {
             colors.set_colors();
         }
 
+        let mut buf = Vec::new();
         loop {
             let frame_start = std::time::Instant::now();
             let is_disconnected = self.report_receiver.is_disconnected();
 
-            for report in self.report_receiver.drain() {
+            let _ = self.report_receiver.drain_into(&mut buf);
+            for report in buf.drain(..) {
                 if let Ok(report) = report.as_ref() {
                     *status_dist.entry(report.status).or_default() += 1;
                 }
@@ -136,11 +124,13 @@ impl Monitor {
 
             let count = 32;
 
-            let timescale = if let Some(timescale) = timescale_auto {
+            // Make ms smallest timescale viewable for TUI
+            let timescale = (if let Some(timescale) = timescale_auto {
                 timescale
             } else {
                 TimeScale::from_elapsed(self.start.elapsed())
-            };
+            })
+            .max(TimeScale::Millisecond);
 
             let bin = timescale.as_secs_f64();
 
@@ -290,7 +280,7 @@ impl Monitor {
                             .unwrap_or_else(|_| "Unknown".to_string())
                     )),
                 ];
-                let stats_title = format!("stats for last {timescale}");
+                let stats_title = format!("Stats for last {timescale}");
                 let stats = Paragraph::new(stats_text).block(
                     Block::default()
                         .title(Span::raw(stats_title))
@@ -407,7 +397,10 @@ impl Monitor {
                     Event::Key(KeyEvent {
                         code: KeyCode::Char('+'),
                         ..
-                    }) => timescale_auto = Some(timescale.dec()),
+                    }) => {
+                        // Make ms the smallest timescale viewable in TUI
+                        timescale_auto = Some(timescale.dec().max(TimeScale::Millisecond))
+                    }
                     Event::Key(KeyEvent {
                         code: KeyCode::Char('-'),
                         ..
@@ -432,15 +425,13 @@ impl Monitor {
                         modifiers: KeyModifiers::CONTROL,
                         ..
                     }) => {
+                        drop(terminal);
                         drop(raw_mode);
                         let _ = crate::printer::print_result(
-                            &mut std::io::stdout(),
-                            self.print_mode,
+                            self.print_config,
                             self.start,
                             &all,
                             now - self.start,
-                            self.disable_color,
-                            self.stats_success_breakdown,
                         );
                         std::process::exit(libc::EXIT_SUCCESS);
                     }
@@ -454,6 +445,6 @@ impl Monitor {
                 tokio::time::sleep(per_frame - elapsed).await;
             }
         }
-        Ok(all)
+        Ok((all, self.print_config))
     }
 }

@@ -4,7 +4,6 @@
 [![Crates.io](https://img.shields.io/crates/v/oha.svg)](https://crates.io/crates/oha)
 [![Arch Linux](https://img.shields.io/archlinux/v/extra/x86_64/oha)](https://archlinux.org/packages/extra/x86_64/oha/)
 [![Homebrew](https://img.shields.io/homebrew/v/oha)](https://formulae.brew.sh/formula/oha)
-[![Gitter](https://img.shields.io/gitter/room/hatoo/oha)](https://gitter.im/hatoo-oha/community#)
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/hatoo)
 
@@ -22,11 +21,18 @@ This program is built on stable Rust, with both `make` and `cmake` prerequisites
 
 You can optionally build oha against [native-tls](https://github.com/sfackler/rust-native-tls) instead of [rustls](https://github.com/rustls/rustls).
 
-    cargo install --no-default-features --features rustls oha
+    cargo install --no-default-features --features native-tls oha
 
 You can enable VSOCK support by enabling `vsock` feature.
 
     cargo install --features vsock oha
+
+You can enable experimental HTTP3 support by enabling the `http3` feature. This uses the [H3](https://github.com/hyperium/h3/r) library by the developers of Hyper.
+It will remain experimental as long as H3 is experimental. It currently depends on using `rustls` for TLS.
+
+## Download pre-built binary
+
+You can download pre-built binary from [Release page](https://github.com/hatoo/oha/releases) for each version and from [Publish workflow](https://github.com/hatoo/oha/actions/workflows/release.yml) and [Publish PGO workflow](https://github.com/hatoo/oha/actions/workflows/release-pgo.yml) for each commit.
 
 ## On Arch Linux
 
@@ -60,13 +66,13 @@ x env use oha
 You can also build and create a container image including oha
 
 ```sh
-docker build . -t example.com/hatoo/oha:latest
+docker build -t hatoo/oha:latest .
 ```
 
 Then you can use oha directly through the container
 
 ```sh
-docker run -it example.com/hatoo/oha:latest https://example.com:3000
+docker run --rm -it --network=host hatoo/oha:latest https://example.com:3000
 ```
 
 ## Profile-Guided Optimization (PGO)
@@ -95,7 +101,7 @@ Ohayou(おはよう), HTTP load generator, inspired by rakyll/hey with tui anima
 Usage: oha [OPTIONS] <URL>
 
 Arguments:
-  <URL>  Target URL.
+  <URL>  Target URL or file with multiple URLs.
 
 Options:
   -n <N_REQUESTS>
@@ -122,6 +128,8 @@ Options:
           Note: If qps is specified, burst will be ignored
       --rand-regex-url
           Generate URL by rand_regex crate but dot is disabled for each query e.g. http://127.0.0.1/[a-z][a-z][0-9]. Currently dynamic scheme, host and port with keep-alive do not work well. See https://docs.rs/rand_regex/latest/rand_regex/struct.Regex.html for details of syntax.
+      --urls-from-file
+          Read the URLs to query from a file
       --max-repeat <MAX_REPEAT>
           A parameter for the '--rand-regex-url'. The max_repeat parameter gives the maximum extra repeat counts the x*, x+ and x{n,} operators will become. [default: 4]
       --dump-urls <DUMP_URLS>
@@ -130,14 +138,14 @@ Options:
           Correct latency to avoid coordinated omission problem. It's ignored if -q is not set.
       --no-tui
           No realtime tui
-  -j, --json
-          Print results as JSON
       --fps <FPS>
           Frame per second for tui. [default: 16]
   -m, --method <METHOD>
           HTTP method [default: GET]
   -H <HEADERS>
           Custom HTTP header. Examples: -H "foo: bar"
+      --proxy-header <PROXY_HEADERS>
+          Custom Proxy HTTP header. Examples: --proxy-header "foo: bar"
   -t <TIMEOUT>
           Timeout for each request. Default to infinite.
   -A <ACCEPT_HEADER>
@@ -149,7 +157,13 @@ Options:
   -T <CONTENT_TYPE>
           Content-Type.
   -a <BASIC_AUTH>
-          Basic authentication, username:password
+          Basic authentication (username:password), or AWS credentials (access_key:secret_key)
+  -F, --form <FORM>
+          Specify HTTP multipart POST data (curl compatible). Examples: -F 'name=value' -F 'file=@path/to/file'
+      --aws-session <AWS_SESSION>
+          AWS session token
+      --aws-sigv4 <AWS_SIGV4>
+          AWS SigV4 signing params (format: aws:amz:region:service)
   -x <PROXY>
           HTTP proxy
       --proxy-http-version <PROXY_HTTP_VERSION>
@@ -157,7 +171,7 @@ Options:
       --proxy-http2
           Use HTTP/2 to connect to proxy. Shorthand for --proxy-http-version=2
       --http-version <HTTP_VERSION>
-          HTTP version. Available values 0.9, 1.0, 1.1, 2.
+          HTTP version. Available values 0.9, 1.0, 1.1, 2, 3
       --http2
           Use HTTP/2. Shorthand for --http-version=2
       --host <HOST>
@@ -174,10 +188,17 @@ Options:
           Lookup only ipv6.
       --ipv4
           Lookup only ipv4.
+      --cacert <CACERT>
+          (TLS) Use the specified certificate file to verify the peer. Native certificate store is used even if this argument is specified.
+      --cert <CERT>
+          (TLS) Use the specified client certificate file. --key must be also specified
+      --key <KEY>
+          (TLS) Use the specified client key file. --cert must be also specified
       --insecure
           Accept invalid certs.
       --connect-to <CONNECT_TO>
           Override DNS resolution and default port numbers with strings like 'example.org:443:localhost:8443'
+          Note: if used several times for the same host:port:target_host:target_port, a random choice is made
       --disable-color
           Disable the color scheme.
       --unix-socket <UNIX_SOCKET>
@@ -188,57 +209,30 @@ Options:
           Write succeeded requests to sqlite database url E.G test.db
       --debug
           Perform a single request and dump the request and response
+  -o, --output <OUTPUT>
+          Output file to write the results to. If not specified, results are written to stdout.
+      --output-format <OUTPUT_FORMAT>
+          Output format [default: text] [possible values: text, json, csv]
+  -u, --time-unit <TIME_UNIT>
+          Time unit to be used. If not specified, the time unit is determined automatically. This option affects only text format. [possible values: ns, us, ms, s, m, h]
   -h, --help
           Print help
   -V, --version
           Print version
 ```
 
-# JSON output
+# Performance
 
-`oha` prints JSON output when `-j` option is set.
+`oha` uses faster implementation when `--no-tui` option is set and both `-q` and `--burst-delay` are not set because it can avoid overhead to gather data realtime.
+
+# Output
+
+By default `oha` outputs a text summary of the results.
+
+`oha` prints JSON summary output when `--output-format json` option is set.
 The schema of JSON output is defined in [schema.json](./schema.json).
 
-# Benchmark
-
-## Performance Comparison
-
-We used `hyperfine` for benchmarking `oha` against `rakyll/hey` on a local server. The server was coded using node. You can start the server by copy pasting this file and then running it via node. After copy-pasting the file, you can run the benchmark via `hyperfine`.
-
-1. Copy-paste the contents into a new javascript file called app.js
-
-```js
-const http = require("http");
-
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-
-  res.end("Hello World\n");
-});
-
-server.listen(3000, () => {
-  console.log("Server running at http://localhost:3000/");
-});
-```
-
-2. Run `node app.js`
-3. Run `hyperfine 'oha --no-tui http://localhost:3000' 'hey http://localhost:3000'` in a different terminal tab
-
-### Benchmark Results
-
-Benchmark 1: oha --no-tui http://localhost:3000
-
-- Time (mean ± σ): 10.8 ms ± 1.8 ms [User: 5.7 ms, System: 11.7 ms]
-- Range (min … max): 8.7 ms … 24.8 ms (107 runs)
-
-Benchmark 2: hey http://localhost:3000
-
-- Time (mean ± σ): 14.3 ms ± 4.6 ms [User: 12.2 ms, System: 19.4 ms]
-- Range (min … max): 11.1 ms … 48.3 ms (88 runs)
-
-### Summary
-
-In this benchmark, `oha --no-tui http://localhost:3000` was found to be faster, running approximately 1.32 ± 0.48 times faster than `hey http://localhost:3000`.
+When `--output-format csv` is used result of each request is printed as a line of comma separated values.
 
 # Tips
 
@@ -283,6 +277,22 @@ Each Urls are generated by [rand_regex](https://github.com/kennytm/rand_regex) c
 Optionally you can set `--max-repeat` option to limit max repeat count for each regex. e.g http://127.0.0.1/[a-z]* with `--max-repeat 4` will generate url like http://127.0.0.1/[a-z]{0,4}
 
 Currently dynamic scheme, host and port with keep-alive are not works well.
+
+## URLs from file feature
+
+You can use `--urls-from-file` to read the target URLs from a file. Each line of this file needs to contain one valid URL as in the example below.
+
+```
+http://domain.tld/foo/bar
+http://domain.tld/assets/vendors-node_modules_highlight_js_lib_index_js-node_modules_tanstack_react-query_build_modern-3fdf40-591fb51c8a6e.js
+http://domain.tld/images/test.png
+http://domain.tld/foo/bar?q=test
+http://domain.tld/foo
+```
+
+Such a file can for example be created from an access log to generate a more realistic load distribution over the different pages of a server. 
+
+When this type of URL specification is used, every request goes to a random URL given in the file.
 
 # Contribution
 

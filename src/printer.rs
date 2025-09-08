@@ -1,4 +1,4 @@
-use crate::result_data::ResultData;
+use crate::{result_data::ResultData, timescale::TimeScale};
 use average::{Max, Min, Variance};
 use byte_unit::Byte;
 use crossterm::style::{StyledContent, Stylize};
@@ -12,17 +12,21 @@ use std::{
 
 #[derive(Clone, Copy)]
 struct StyleScheme {
-    color_enabled: bool,
+    style_enabled: bool,
 }
 impl StyleScheme {
-    fn no_color(self, text: &str) -> StyledContent<&str> {
-        text.reset()
+    fn no_style(self, text: &str) -> StyledContent<&str> {
+        StyledContent::new(crossterm::style::ContentStyle::new(), text)
     }
     fn heading(self, text: &str) -> StyledContent<&str> {
-        text.bold().underlined()
+        if self.style_enabled {
+            text.bold().underlined()
+        } else {
+            self.no_style(text)
+        }
     }
     fn success_rate(self, text: &str, success_rate: f64) -> StyledContent<&str> {
-        if self.color_enabled {
+        if self.style_enabled {
             if success_rate >= 100.0 {
                 text.green().bold()
             } else if success_rate >= 99.0 {
@@ -31,28 +35,28 @@ impl StyleScheme {
                 text.red().bold()
             }
         } else {
-            self.no_color(text).bold()
+            self.no_style(text)
         }
     }
     fn fastest(self, text: &str) -> StyledContent<&str> {
-        if self.color_enabled {
+        if self.style_enabled {
             text.green()
         } else {
-            self.no_color(text)
+            self.no_style(text)
         }
     }
     fn slowest(self, text: &str) -> StyledContent<&str> {
-        if self.color_enabled {
+        if self.style_enabled {
             text.yellow()
         } else {
-            self.no_color(text)
+            self.no_style(text)
         }
     }
     fn average(self, text: &str) -> StyledContent<&str> {
-        if self.color_enabled {
+        if self.style_enabled {
             text.cyan()
         } else {
-            self.no_color(text)
+            self.no_style(text)
         }
     }
 
@@ -61,7 +65,7 @@ impl StyleScheme {
         const LATENCY_YELLOW_THRESHOLD: f64 = 0.1;
         const LATENCY_RED_THRESHOLD: f64 = 0.4;
 
-        if self.color_enabled {
+        if self.style_enabled {
             if label <= LATENCY_YELLOW_THRESHOLD {
                 text.green()
             } else if label <= LATENCY_RED_THRESHOLD {
@@ -70,12 +74,12 @@ impl StyleScheme {
                 text.red()
             }
         } else {
-            self.no_color(text)
+            self.no_style(text)
         }
     }
 
     fn status_distribution(self, text: &str, status: StatusCode) -> StyledContent<&str> {
-        if self.color_enabled {
+        if self.style_enabled {
             if status.is_success() {
                 text.green()
             } else if status.is_client_error() {
@@ -86,35 +90,50 @@ impl StyleScheme {
                 text.white()
             }
         } else {
-            self.no_color(text)
+            self.no_style(text)
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub enum PrintMode {
+    #[default]
     Text,
     Json,
+    Csv,
 }
 
-pub fn print_result<W: Write>(
-    w: &mut W,
-    mode: PrintMode,
+pub struct PrintConfig {
+    pub output: Box<dyn Write + Send + 'static>,
+    pub mode: PrintMode,
+    pub disable_style: bool,
+    pub stats_success_breakdown: bool,
+    pub time_unit: Option<TimeScale>,
+}
+
+pub fn print_result(
+    mut config: PrintConfig,
     start: Instant,
     res: &ResultData,
     total_duration: Duration,
-    disable_color: bool,
-    stats_success_breakdown: bool,
 ) -> anyhow::Result<()> {
-    match mode {
+    match config.mode {
         PrintMode::Text => print_summary(
-            w,
+            &mut config.output,
             res,
             total_duration,
-            disable_color,
-            stats_success_breakdown,
+            config.disable_style,
+            config.stats_success_breakdown,
+            config.time_unit,
         )?,
-        PrintMode::Json => print_json(w, start, res, total_duration, stats_success_breakdown)?,
+        PrintMode::Json => print_json(
+            &mut config.output,
+            start,
+            res,
+            total_duration,
+            config.stats_success_breakdown,
+        )?,
+        PrintMode::Csv => print_csv(&mut config.output, start, res)?,
     }
     Ok(())
 }
@@ -359,16 +378,54 @@ fn print_json<W: Write>(
     )
 }
 
+fn print_csv<W: Write>(w: &mut W, start: Instant, res: &ResultData) -> std::io::Result<()> {
+    // csv header
+    writeln!(
+        w,
+        "request-start,DNS,DNS+dialup,Response-delay,request-duration,bytes,status"
+    )?;
+
+    let mut success_requests = res.success().to_vec();
+    success_requests.sort_by_key(|r| r.start);
+
+    for request in success_requests {
+        let dns_and_dialup = match request.connection_time {
+            Some(connection_time) => (
+                connection_time.dns_lookup - request.start,
+                connection_time.dialup - request.start,
+            ),
+            None => (std::time::Duration::ZERO, std::time::Duration::ZERO),
+        };
+        let first_byte = match request.first_byte {
+            Some(first_byte) => first_byte - request.start,
+            None => std::time::Duration::ZERO,
+        };
+        writeln!(
+            w,
+            "{},{},{},{},{},{},{}",
+            (request.start - start).as_secs_f64(),
+            dns_and_dialup.0.as_secs_f64(),
+            dns_and_dialup.1.as_secs_f64(),
+            first_byte.as_secs_f64(),
+            request.duration().as_secs_f64(),
+            request.len_bytes,
+            request.status.as_u16(),
+        )?;
+    }
+    Ok(())
+}
+
 /// Print all summary as Text
 fn print_summary<W: Write>(
     w: &mut W,
     res: &ResultData,
     total_duration: Duration,
-    disable_color: bool,
+    disable_style: bool,
     stats_success_breakdown: bool,
+    time_unit: Option<TimeScale>,
 ) -> std::io::Result<()> {
     let style = StyleScheme {
-        color_enabled: !disable_color,
+        style_enabled: !disable_style,
     };
     writeln!(w, "{}", style.heading("Summary:"))?;
     let success_rate = 100.0 * res.success_rate();
@@ -380,22 +437,42 @@ fn print_summary<W: Write>(
             success_rate
         )
     )?;
-    writeln!(w, "  Total:\t{:.4} secs", total_duration.as_secs_f64())?;
     let latency_stat = res.latency_stat();
+    // Determine timescale automatically
+    let timescale = if let Some(timescale) = time_unit {
+        timescale
+    } else {
+        // Use max latency (slowest request)
+        TimeScale::from_f64(latency_stat.max())
+    };
     writeln!(
         w,
-        "{}",
-        style.slowest(&format!("  Slowest:\t{:.4} secs", latency_stat.max()))
+        "  Total:\t{:.4} {timescale}",
+        total_duration.as_secs_f64() / timescale.as_secs_f64()
     )?;
     writeln!(
         w,
         "{}",
-        style.fastest(&format!("  Fastest:\t{:.4} secs", latency_stat.min()))
+        style.slowest(&format!(
+            "  Slowest:\t{:.4} {timescale}",
+            latency_stat.max() / timescale.as_secs_f64()
+        ))
     )?;
     writeln!(
         w,
         "{}",
-        style.average(&format!("  Average:\t{:.4} secs", latency_stat.mean()))
+        style.fastest(&format!(
+            "  Fastest:\t{:.4} {timescale}",
+            latency_stat.min() / timescale.as_secs_f64()
+        ))
+    )?;
+    writeln!(
+        w,
+        "{}",
+        style.average(&format!(
+            "  Average:\t{:.4} {timescale}",
+            latency_stat.mean() / timescale.as_secs_f64()
+        ))
     )?;
     writeln!(
         w,
@@ -427,11 +504,11 @@ fn print_summary<W: Write>(
     let duration_all_statistics = res.duration_all_statistics();
 
     writeln!(w, "{}", style.heading("Response time histogram:"))?;
-    print_histogram(w, &duration_all_statistics.histogram, style)?;
+    print_histogram(w, &duration_all_statistics.histogram, style, timescale)?;
     writeln!(w)?;
 
     writeln!(w, "{}", style.heading("Response time distribution:"))?;
-    print_distribution(w, &duration_all_statistics.percentiles, style)?;
+    print_distribution(w, &duration_all_statistics.percentiles, style, timescale)?;
     writeln!(w)?;
 
     if stats_success_breakdown {
@@ -442,7 +519,7 @@ fn print_summary<W: Write>(
             "{}",
             style.heading("Response time histogram (2xx only):")
         )?;
-        print_histogram(w, &durations_successful_statics.histogram, style)?;
+        print_histogram(w, &durations_successful_statics.histogram, style, timescale)?;
         writeln!(w)?;
 
         writeln!(
@@ -450,7 +527,12 @@ fn print_summary<W: Write>(
             "{}",
             style.heading("Response time distribution (2xx only):")
         )?;
-        print_distribution(w, &durations_successful_statics.percentiles, style)?;
+        print_distribution(
+            w,
+            &durations_successful_statics.percentiles,
+            style,
+            timescale,
+        )?;
         writeln!(w)?;
 
         let durations_not_successful = res.duration_not_successful_statistics();
@@ -460,7 +542,7 @@ fn print_summary<W: Write>(
             "{}",
             style.heading("Response time histogram (4xx + 5xx only):")
         )?;
-        print_histogram(w, &durations_not_successful.histogram, style)?;
+        print_histogram(w, &durations_not_successful.histogram, style, timescale)?;
         writeln!(w)?;
 
         writeln!(
@@ -468,7 +550,7 @@ fn print_summary<W: Write>(
             "{}",
             style.heading("Response time distribution (4xx + 5xx only):")
         )?;
-        print_distribution(w, &durations_not_successful.percentiles, style)?;
+        print_distribution(w, &durations_not_successful.percentiles, style, timescale)?;
         writeln!(w)?;
     }
     writeln!(w)?;
@@ -484,17 +566,17 @@ fn print_summary<W: Write>(
 
     writeln!(
         w,
-        "  DNS+dialup:\t{:.4} secs, {:.4} secs, {:.4} secs",
-        dns_dialup_stat.mean(),
-        dns_dialup_stat.min(),
-        dns_dialup_stat.max()
+        "  DNS+dialup:\t{:.4} {timescale}, {:.4} {timescale}, {:.4} {timescale}",
+        dns_dialup_stat.mean() / timescale.as_secs_f64(),
+        dns_dialup_stat.min() / timescale.as_secs_f64(),
+        dns_dialup_stat.max() / timescale.as_secs_f64()
     )?;
     writeln!(
         w,
-        "  DNS-lookup:\t{:.4} secs, {:.4} secs, {:.4} secs",
-        dns_lookup_stat.mean(),
-        dns_lookup_stat.min(),
-        dns_lookup_stat.max()
+        "  DNS-lookup:\t{:.4} {timescale}, {:.4} {timescale}, {:.4} {timescale}",
+        dns_lookup_stat.mean() / timescale.as_secs_f64(),
+        dns_lookup_stat.min() / timescale.as_secs_f64(),
+        dns_lookup_stat.max() / timescale.as_secs_f64()
     )?;
     writeln!(w)?;
 
@@ -539,12 +621,13 @@ fn print_histogram<W: Write>(
     w: &mut W,
     data: &[(f64, usize)],
     style: StyleScheme,
+    timescale: TimeScale,
 ) -> std::io::Result<()> {
     let max_bar = data.iter().map(|t| t.1).max().unwrap();
     let str_len_max = max_bar.to_string().len();
     let width = data
         .iter()
-        .map(|t| (t.0 as u64).to_string().len())
+        .map(|t| ((t.0 / timescale.as_secs_f64()) as u64).to_string().len())
         .max()
         .unwrap()
         + 4;
@@ -556,8 +639,8 @@ fn print_histogram<W: Write>(
             "{}",
             style.latency_distribution(
                 &format!(
-                    "  {:>width$.3} [{}]{} |",
-                    label,
+                    "  {:>width$.3} {timescale} [{}]{} |",
+                    label / timescale.as_secs_f64(),
                     b,
                     " ".repeat(indent),
                     width = width
@@ -597,12 +680,19 @@ fn print_distribution<W: Write>(
     w: &mut W,
     percentiles: &[(f64, f64)],
     style: StyleScheme,
+    timescale: TimeScale,
 ) -> std::io::Result<()> {
     for (p, v) in percentiles {
         writeln!(
             w,
             "{}",
-            style.latency_distribution(&format!("  {p:.2}% in {v:.4} secs"), *v)
+            style.latency_distribution(
+                &format!(
+                    "  {p:.2}% in {:.4} {timescale}",
+                    v / timescale.as_secs_f64()
+                ),
+                *v
+            )
         )?;
     }
 

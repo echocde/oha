@@ -1,5 +1,35 @@
 # Unreleased
 
+# 1.10.0 (2025-09-06)
+
+- fix dns lookup on http2/http3 #771 
+- feat: add curl-compatible multipart form data support (-F option) #755
+
+# 1.9.0 (2025-06-21)
+
+- Implement experimental HTTP3 support #746 
+- Allow appending to database if oha table has already been created #742 
+- Add -u/--time-unit option #741 
+- Add RequestResult.first_byte field for measuring first body byte latency #727 
+- Add support for results in csv format #725 
+- Add support for fractional QPS values #724 
+
+# 1.8.0 (2025-02-15)
+
+- Support mtls #687 
+- Support Proxy headers #688 
+- Randomize --connect-to if multiple matching options #695 
+
+# 1.7.0 (2025-02-01)
+
+- Impl support for calling AWS APIs with sigv4 #666 
+- support -o #669 
+
+# 1.6.0 (2025-01-11)
+
+- Feature: Reading Urls from file #639
+- Add some optimized workers to `--no-tui` mode #646
+
 # 1.5.0 (2024-12-07)
 
 - Add `--debug` option to check actual request/response
